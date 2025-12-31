@@ -63,22 +63,34 @@ const RESPONSE_SCHEMA = {
 // Helper to sanitize AI output and prevent [object Object] errors in UI
 function sanitizeString(val: any): string {
   if (val === null || val === undefined) return "";
-  if (typeof val === 'string') return val;
-  if (typeof val === 'number') return String(val);
-  if (Array.isArray(val)) {
-    return val.map(v => typeof v === 'object' ? JSON.stringify(v) : String(v)).join(', ');
+  if (typeof val === 'string') {
+    // Explicitly catch stringified object artifact
+    return val === '[object Object]' ? "" : val;
   }
+  if (typeof val === 'number') return String(val);
+  
+  if (Array.isArray(val)) {
+    return val.map(v => sanitizeString(v)).join(', ');
+  }
+  
   if (typeof val === 'object') {
-    if (val.text) return String(val.text);
-    if (val.value) return String(val.value);
+    // Try to extract text property if it exists (common in some AI types)
+    if (val.text && typeof val.text === 'string') return val.text;
+    if (val.value && typeof val.value === 'string') return val.value;
+    
+    // Attempt to stringify valid objects to JSON string to avoid [object Object]
     try {
       const stringified = JSON.stringify(val);
-      return stringified === '{}' ? "" : stringified;
+      if (stringified === '{}' || stringified === '[]') return "";
+      return stringified;
     } catch {
       return "";
     }
   }
-  return String(val);
+  
+  // Final safety net
+  const result = String(val);
+  return result === '[object Object]' ? "" : result;
 }
 
 export const analyzePrescription = async (base64Image: string, mimeType: string = "image/png"): Promise<AnalysisResult> => {
@@ -105,36 +117,60 @@ export const analyzePrescription = async (base64Image: string, mimeType: string 
 
     let parsed: any;
     try {
-      parsed = JSON.parse(text);
+      // 1. Try to remove markdown code blocks (```json ... ```)
+      const cleanedText = text.replace(/```json/g, '').replace(/```/g, '').trim();
+      parsed = JSON.parse(cleanedText);
     } catch (e) {
-      // Fallback: If model ignores responseMimeType (rare), try extracting JSON from markdown
+      // 2. Fallback: Try regex extraction if strict parsing fails
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        parsed = JSON.parse(jsonMatch[0]);
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch (e2) {
+          console.error("Regex parsing failed:", e2);
+          throw new Error("Failed to parse AI response as JSON");
+        }
       } else {
+        console.error("No JSON structure found in text:", text);
         throw new Error("Failed to parse AI response as JSON");
       }
     }
 
-    // Defensive Sanitization
-    parsed.medications = (parsed.medications || []).map((m: any) => ({
-      prescribed_brand: sanitizeString(m.prescribed_brand),
-      active_salt: sanitizeString(m.active_salt),
-      jan_aushadhi_generic: sanitizeString(m.jan_aushadhi_generic),
-      brand_price_est: sanitizeString(m.brand_price_est),
-      jan_aushadhi_price_est: sanitizeString(m.jan_aushadhi_price_est),
-      savings_est: sanitizeString(m.savings_est)
-    }));
+    // Defensive initialization to prevent crashes if properties are missing
+    if (!parsed) parsed = {};
+    if (!parsed.metadata) parsed.metadata = {};
+    if (!parsed.medications || !Array.isArray(parsed.medications)) parsed.medications = [];
+    if (!parsed.bhashini_summary) parsed.bhashini_summary = {};
+
+    // Sanitization for all fields and FILTERING
+    parsed.medications = parsed.medications
+      .map((m: any) => ({
+        prescribed_brand: sanitizeString(m.prescribed_brand),
+        active_salt: sanitizeString(m.active_salt),
+        jan_aushadhi_generic: sanitizeString(m.jan_aushadhi_generic),
+        brand_price_est: sanitizeString(m.brand_price_est),
+        jan_aushadhi_price_est: sanitizeString(m.jan_aushadhi_price_est),
+        savings_est: sanitizeString(m.savings_est)
+      }))
+      .filter((m: any) => {
+        const brand = m.prescribed_brand.toLowerCase();
+        // If brand is missing or explicitly "not provided", it's not a valid detected medicine.
+        // This ensures the "No medicines detected" state triggers in App.tsx
+        return brand && brand.length > 1 && !brand.includes('not provided') && !brand.includes('illegible');
+      });
 
     parsed.metadata.doctor = sanitizeString(parsed.metadata.doctor || "Not provided in image");
     parsed.metadata.date = sanitizeString(parsed.metadata.date || "Not provided in image");
-    
+    parsed.metadata.currency = sanitizeString(parsed.metadata.currency || "INR");
+
     const s = parsed.bhashini_summary;
     parsed.bhashini_summary = {
       en: sanitizeString(s.en || "Analysis complete."),
       hi: sanitizeString(s.hi), te: sanitizeString(s.te), ta: sanitizeString(s.ta),
       kn: sanitizeString(s.kn), bn: sanitizeString(s.bn), mr: sanitizeString(s.mr)
     };
+    
+    parsed.disclaimer = sanitizeString(parsed.disclaimer);
     
     return parsed as AnalysisResult;
   } catch (error) {
@@ -163,7 +199,7 @@ export const findNearestStore = async (lat: number, lng: number): Promise<StoreL
     const metadata = candidates[0].groundingMetadata;
     const chunks = metadata?.groundingChunks || [];
     
-    let mapUri = `https://www.google.com/maps/search/?api=1&query=Jan+Aushadhi+Kendra+near+${lat},${lng}`;
+    let mapUri = "";
     let name = "Jan Aushadhi Kendra";
     let snippets = "";
 
@@ -178,11 +214,18 @@ export const findNearestStore = async (lat: number, lng: number): Promise<StoreL
       }
     });
 
-    const text = response.text || "";
+    // Ensure text is treated as string, handle undefined
+    const text = typeof response.text === 'string' ? response.text : "";
     let address = sanitizeString(text.replace(/\*/g, '').trim());
     
     if (!address || address.length < 5) {
       address = `Jan Aushadhi Kendra (Verified Location)${snippets ? ': ' + snippets : ''}`;
+    }
+
+    // Improve Map URI fallback if specific grounding link isn't found
+    if (!mapUri) {
+      // Force a search view centered on the user's location
+      mapUri = `https://www.google.com/maps/search/Pradhan+Mantri+Bhartiya+Janaushadhi+Kendra/@${lat},${lng},15z`;
     }
 
     return {
