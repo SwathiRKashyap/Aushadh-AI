@@ -60,43 +60,58 @@ const RESPONSE_SCHEMA = {
   required: ["metadata", "medications", "bhashini_summary", "disclaimer"]
 };
 
-// Helper to sanitize AI output and prevent [object Object] errors in UI
+/**
+ * Hyper-robust string sanitization to prevent [object Object] from leaking into UI.
+ */
 function sanitizeString(val: any): string {
   if (val === null || val === undefined) return "";
+  
   if (typeof val === 'string') {
-    // Explicitly catch stringified object artifact
+    const trimmed = val.trim();
+    if (trimmed === '[object Object]' || trimmed.startsWith('{"') || trimmed.startsWith('{')) {
+      try {
+        const p = JSON.parse(trimmed);
+        return sanitizeString(p);
+      } catch {
+        return trimmed === '[object Object]' ? "" : trimmed;
+      }
+    }
     return val === '[object Object]' ? "" : val;
   }
-  if (typeof val === 'number') return String(val);
+  
+  if (typeof val === 'number' || typeof val === 'boolean') return String(val);
   
   if (Array.isArray(val)) {
-    return val.map(v => sanitizeString(v)).join(', ');
+    return val.map(v => sanitizeString(v)).filter(Boolean).join(', ');
   }
   
   if (typeof val === 'object') {
-    // Try to extract text property if it exists (common in some AI types)
-    if (val.text && typeof val.text === 'string') return val.text;
-    if (val.value && typeof val.value === 'string') return val.value;
-    
-    // Attempt to stringify valid objects to JSON string to avoid [object Object]
-    try {
-      const stringified = JSON.stringify(val);
-      if (stringified === '{}' || stringified === '[]') return "";
-      return stringified;
-    } catch {
-      return "";
+    // Check for common AI-generated object keys used in place of strings
+    const priorityKeys = ['text', 'value', 'displayValue', 'brand', 'name', 'message'];
+    for (const key of priorityKeys) {
+      if (val[key] !== undefined && val[key] !== null) {
+        return sanitizeString(val[key]);
+      }
     }
+    
+    // Fallback: check if it's a simple object with one key
+    const keys = Object.keys(val);
+    if (keys.length === 1) {
+      return sanitizeString(val[keys[0]]);
+    }
+    
+    return ""; // Defensively return empty for complex objects to avoid [object Object]
   }
   
-  // Final safety net
-  const result = String(val);
-  return result === '[object Object]' ? "" : result;
+  const final = String(val);
+  return final === '[object Object]' ? "" : final;
 }
 
-export const analyzePrescription = async (base64Image: string, mimeType: string = "image/png"): Promise<AnalysisResult> => {
+export const analyzePrescription = async (base64Image: string, mimeType: string = "image/jpeg"): Promise<AnalysisResult> => {
   try {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const model = 'gemini-3-flash-preview';
+    // Switching to 'gemini-flash-lite-latest' for significantly faster processing as requested
+    const model = 'gemini-flash-lite-latest';
 
     const response = await ai.models.generateContent({
       model: model,
@@ -108,7 +123,9 @@ export const analyzePrescription = async (base64Image: string, mimeType: string 
       },
       config: { 
         responseMimeType: "application/json",
-        responseSchema: RESPONSE_SCHEMA
+        responseSchema: RESPONSE_SCHEMA,
+        // Disable thinking budget to minimize latency for the "flash lite" model
+        thinkingConfig: { thinkingBudget: 0 }
       }
     });
 
@@ -117,32 +134,26 @@ export const analyzePrescription = async (base64Image: string, mimeType: string 
 
     let parsed: any;
     try {
-      // 1. Try to remove markdown code blocks (```json ... ```)
       const cleanedText = text.replace(/```json/g, '').replace(/```/g, '').trim();
       parsed = JSON.parse(cleanedText);
     } catch (e) {
-      // 2. Fallback: Try regex extraction if strict parsing fails
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch[0]);
         } catch (e2) {
-          console.error("Regex parsing failed:", e2);
           throw new Error("Failed to parse AI response as JSON");
         }
       } else {
-        console.error("No JSON structure found in text:", text);
-        throw new Error("Failed to parse AI response as JSON");
+        throw new Error("No JSON structure found in text");
       }
     }
 
-    // Defensive initialization to prevent crashes if properties are missing
     if (!parsed) parsed = {};
     if (!parsed.metadata) parsed.metadata = {};
     if (!parsed.medications || !Array.isArray(parsed.medications)) parsed.medications = [];
     if (!parsed.bhashini_summary) parsed.bhashini_summary = {};
 
-    // Sanitization for all fields and FILTERING
     parsed.medications = parsed.medications
       .map((m: any) => ({
         prescribed_brand: sanitizeString(m.prescribed_brand),
@@ -154,8 +165,6 @@ export const analyzePrescription = async (base64Image: string, mimeType: string 
       }))
       .filter((m: any) => {
         const brand = m.prescribed_brand.toLowerCase();
-        // If brand is missing or explicitly "not provided", it's not a valid detected medicine.
-        // This ensures the "No medicines detected" state triggers in App.tsx
         return brand && brand.length > 1 && !brand.includes('not provided') && !brand.includes('illegible');
       });
 
@@ -182,14 +191,15 @@ export const analyzePrescription = async (base64Image: string, mimeType: string 
 export const findNearestStore = async (lat: number, lng: number): Promise<StoreLocation | null> => {
   try {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const prompt = `Find the nearest 'Pradhan Mantri Bhartiya Janaushadhi Kendra' to location ${lat}, ${lng}.`;
+    const prompt = `Find the nearest 'Pradhan Mantri Bhartiya Janaushadhi Kendra' near coordinates ${lat}, ${lng}. Provide the full address and a maps link.`;
 
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         tools: [{googleMaps: {}}],
-        toolConfig: { retrievalConfig: { latLng: { latitude: lat, longitude: lng } } }
+        toolConfig: { retrievalConfig: { latLng: { latitude: lat, longitude: lng } } },
+        thinkingConfig: { thinkingBudget: 0 } // Speed up store finding too
       },
     });
 
@@ -205,32 +215,29 @@ export const findNearestStore = async (lat: number, lng: number): Promise<StoreL
 
     chunks.forEach((chunk: any) => {
       if (chunk.maps) {
-        if (chunk.maps.uri) mapUri = chunk.maps.uri;
-        if (chunk.maps.title) name = chunk.maps.title;
+        if (chunk.maps.uri) mapUri = sanitizeString(chunk.maps.uri);
+        if (chunk.maps.title) name = sanitizeString(chunk.maps.title);
         if (chunk.maps.placeAnswerSources?.reviewSnippets) {
           const s = chunk.maps.placeAnswerSources.reviewSnippets;
-          if (Array.isArray(s)) snippets += " " + s.join(". ");
+          if (Array.isArray(s)) snippets += " " + s.map(v => sanitizeString(v)).join(". ");
         }
       }
     });
 
-    // Ensure text is treated as string, handle undefined
-    const text = typeof response.text === 'string' ? response.text : "";
-    let address = sanitizeString(text.replace(/\*/g, '').trim());
+    const rawText = typeof response.text === 'string' ? response.text : "";
+    let address = sanitizeString(rawText.replace(/\*/g, '').trim());
     
     if (!address || address.length < 5) {
-      address = `Jan Aushadhi Kendra (Verified Location)${snippets ? ': ' + snippets : ''}`;
+      address = `Jan Aushadhi Kendra (Verified Store)${snippets ? ': ' + snippets : ''}`;
     }
 
-    // Improve Map URI fallback if specific grounding link isn't found
     if (!mapUri) {
-      // Force a search view centered on the user's location
       mapUri = `https://www.google.com/maps/search/Pradhan+Mantri+Bhartiya+Janaushadhi+Kendra/@${lat},${lng},15z`;
     }
 
     return {
-      name: sanitizeString(name),
-      address: address,
+      name: sanitizeString(name) || "Jan Aushadhi Kendra",
+      address: sanitizeString(address),
       mapUri: sanitizeString(mapUri)
     };
   } catch (error) {

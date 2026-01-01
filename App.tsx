@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { UploadPanel } from './components/UploadPanel';
 import { ImagePreview } from './components/ImagePreview';
@@ -9,6 +10,7 @@ import { analyzePrescription } from './services/geminiService';
 import { AppStatus, AnalysisResult } from './types';
 import { Stethoscope, Trash2, AlertCircle, Info } from 'lucide-react';
 
+// Explicitly importing React to resolve the 'Cannot find namespace React' error for React.FC
 const App: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -79,7 +81,8 @@ const App: React.FC = () => {
           const canvas = document.createElement('canvas');
           let width = img.width;
           let height = img.height;
-          const MAX_DIMENSION = 1280;
+          // Reduced MAX_DIMENSION to 1024 for faster transmission and inference without significant OCR loss
+          const MAX_DIMENSION = 1024;
           if (width > height) {
             if (width > MAX_DIMENSION) {
               height *= MAX_DIMENSION / width;

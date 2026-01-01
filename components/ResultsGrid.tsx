@@ -12,7 +12,7 @@ const SUPPORTED_LANGUAGES = [
   { code: 'hi', label: 'Hindi (हिंदी)' },
   { code: 'te', label: 'Telugu (తెలుగు)' },
   { code: 'ta', label: 'Tamil (தமிழ்)' },
-  { code: 'kn', label: 'Kannada (ಕನ್ನಡ)' },
+  { code: 'kn', label: 'Kannada (కನ್ನಡ)' },
   { code: 'bn', label: 'Bengali (বাংলা)' },
   { code: 'mr', label: 'Marathi (मరాఠీ)' },
 ];
@@ -154,20 +154,21 @@ export const ResultsGrid: React.FC<ResultsGridProps> = ({ result }) => {
   };
 
   const hasMeds = result.medications.length > 0;
-
-  // If no medications are found, hide the results grid entirely (App.tsx handles the info alert)
   if (!hasMeds) return null;
+
+  const doctorName = result.metadata.doctor.toLowerCase().includes('not provided') ? 'Unknown Practitioner' : result.metadata.doctor;
+  const dateStr = result.metadata.date.toLowerCase().includes('not provided') ? 'Not specified' : result.metadata.date;
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
       <div className="bg-green-50 rounded-lg p-4 border border-green-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div className="flex-1 pr-4">
            <h2 className="text-sm font-semibold text-green-800 uppercase tracking-wide">Doctor</h2>
-           <p className="text-gray-900 font-medium break-words leading-tight">{result.metadata.doctor}</p>
+           <p className="text-gray-900 font-medium break-words leading-tight">{doctorName}</p>
         </div>
         <div className="sm:text-right shrink-0">
            <h2 className="text-sm font-semibold text-green-800 uppercase tracking-wide">Date</h2>
-           <p className="text-gray-900 font-medium">{result.metadata.date}</p>
+           <p className="text-gray-900 font-medium">{dateStr}</p>
         </div>
       </div>
 
